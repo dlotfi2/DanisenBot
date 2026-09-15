@@ -120,8 +120,8 @@ class TestDanisen(unittest.IsolatedAsyncioTestCase):
             self.danisen.unregister,
             self.ctx, char1,
             db_calls=[
-                ("SELECT * FROM players WHERE discord_id=12345 AND dan=1",),
-                ("DELETE FROM players WHERE discord_id=12345 AND character='Hyde'",)
+                ("SELECT * FROM players WHERE discord_id=? AND dan=?", (12345, 1)),
+                ("DELETE FROM players WHERE discord_id=? AND character=?", (12345, "Hyde"))
             ],
             response="You have now unregistered Hyde"
         )
@@ -241,10 +241,12 @@ class TestDanisen(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(winner_rank, [2, 0])
         self.assertEqual(loser_rank, [1, 0])
         self.database_cur.execute.assert_any_call(
-            "UPDATE players SET dan = 2, points = 0 WHERE player_name='Winner' AND character='Hyde'"
+            "UPDATE players SET dan = ?, points = ? WHERE player_name=? AND character=?",
+            (2, 0, "Winner", "Hyde")
         )
         self.database_cur.execute.assert_any_call(
-            "UPDATE players SET dan = 1, points = 0 WHERE player_name='Loser' AND character='Linne'"
+            "UPDATE players SET dan = ?, points = ? WHERE player_name=? AND character=?",
+            (1, 0, "Loser", "Linne")
         )
 
     async def test_set_queue(self):
@@ -355,10 +357,12 @@ class TestDanisen(unittest.IsolatedAsyncioTestCase):
         )
 
         self.database_cur.execute.assert_any_call(
-            "UPDATE players SET dan = 2, points = 0 WHERE player_name='Player1' AND character='Hyde'"
+            "UPDATE players SET dan = ?, points = ? WHERE player_name=? AND character=?",
+            (2, 0, "Player1", "Hyde")
         )
         self.database_cur.execute.assert_any_call(
-            "UPDATE players SET dan = 1, points = 0 WHERE player_name='Player2' AND character='Linne'"
+            "UPDATE players SET dan = ?, points = ? WHERE player_name=? AND character=?",
+            (1, 0, "Player2", "Linne")
         )
         self.ctx.respond.assert_called_with(
             "Match has been reported as Player1's victory over Player2\n"
@@ -417,7 +421,8 @@ class TestDanisen(unittest.IsolatedAsyncioTestCase):
         await self.danisen.set_rank(self.ctx, player_name, char, dan, points)
 
         self.database_cur.execute.assert_called_with(
-            "UPDATE players SET dan = 3, points = 2 WHERE player_name='TestPlayer' AND character='Hyde'"
+            "UPDATE players SET dan = ?, points = ? WHERE player_name=? AND character=?",
+            (3, 2, "TestPlayer", "Hyde")
         )
         self.database_con.commit.assert_called_once()
         self.ctx.respond.assert_called_with("TestPlayer's Hyde rank updated to be dan 3 points 2")
@@ -599,10 +604,12 @@ class TestDanisen(unittest.IsolatedAsyncioTestCase):
         await self.danisen.report_match_queue(self.ctx, player1, player2, winner="player1")
 
         self.database_cur.execute.assert_any_call(
-            "UPDATE players SET dan = 2, points = 0 WHERE player_name='Player1' AND character='Hyde'"
+            "UPDATE players SET dan = ?, points = ? WHERE player_name=? AND character=?",
+            (2, 0, "Player1", "Hyde")
         )
         self.database_cur.execute.assert_any_call(
-            "UPDATE players SET dan = 1, points = 0 WHERE player_name='Player2' AND character='Linne'"
+            "UPDATE players SET dan = ?, points = ? WHERE player_name=? AND character=?",
+            (1, 0, "Player2", "Linne")
         )
         mock_channel.send.assert_called_once_with(
             "Match has been reported as Player1's victory over Player2\n"
@@ -731,3 +738,91 @@ class TestDanisen(unittest.IsolatedAsyncioTestCase):
 
         winner_rank, loser_rank = await self.danisen.score_update(self.ctx, winner, loser)
         self.assertEqual(winner_rank, [9, 0], "High-rank player should rank up normally when special rules are disabled")
+
+    def _make_role(self, name, position=1):
+        role = MagicMock()
+        role.name = name
+        role.position = position
+        return role
+
+    async def test_sync_guild_roles_adds_and_removes(self):
+        """Test that sync_guild_roles reconciles stale/missing roles against the database."""
+        self.mock_database_response(fetchall=[
+            {"discord_id": 111, "character": "Hyde", "dan": 2}
+        ])
+
+        stale_dan_role = self._make_role("Dan 1")
+        stale_char_role = self._make_role("Linne")
+        dan2_role = self._make_role("Dan 2")
+        hyde_role = self._make_role("Hyde")
+
+        member = MagicMock()
+        member.id = 111
+        member.name = "TestPlayer"
+        member.roles = [stale_dan_role, stale_char_role]
+        member.add_roles = AsyncMock()
+        member.remove_roles = AsyncMock()
+
+        bot_member = MagicMock()
+        bot_member.top_role.position = 10
+        bot_member.guild_permissions.manage_roles = True
+
+        self.bot.user.id = 999
+        guild = MagicMock()
+        guild.members = [member]
+        guild.roles = [stale_dan_role, stale_char_role, dan2_role, hyde_role]
+        guild.get_member = MagicMock(return_value=bot_member)
+
+        result = await self.danisen.sync_guild_roles(guild)
+
+        self.assertEqual(result, {"added": 2, "removed": 2, "skipped_members": 0})
+        member.add_roles.assert_called_once()
+        self.assertEqual(set(member.add_roles.call_args.args), {dan2_role, hyde_role})
+        member.remove_roles.assert_called_once()
+        self.assertEqual(set(member.remove_roles.call_args.args), {stale_dan_role, stale_char_role})
+
+    async def test_sync_guild_roles_skips_when_bot_cannot_manage_role(self):
+        """Test that sync_guild_roles leaves roles alone when the bot lacks permission to manage them."""
+        self.mock_database_response(fetchall=[
+            {"discord_id": 111, "character": "Hyde", "dan": 2}
+        ])
+
+        stale_dan_role = self._make_role("Dan 1")
+        dan2_role = self._make_role("Dan 2")
+        hyde_role = self._make_role("Hyde")
+
+        member = MagicMock()
+        member.id = 111
+        member.name = "TestPlayer"
+        member.roles = [stale_dan_role]
+        member.add_roles = AsyncMock()
+        member.remove_roles = AsyncMock()
+
+        bot_member = MagicMock()
+        bot_member.top_role.position = 1  # Too low to manage any of these roles
+        bot_member.guild_permissions.manage_roles = True
+
+        self.bot.user.id = 999
+        guild = MagicMock()
+        guild.members = [member]
+        guild.roles = [stale_dan_role, dan2_role, hyde_role]
+        guild.get_member = MagicMock(return_value=bot_member)
+
+        result = await self.danisen.sync_guild_roles(guild)
+
+        self.assertEqual(result, {"added": 0, "removed": 0, "skipped_members": 1})
+        member.add_roles.assert_not_called()
+        member.remove_roles.assert_not_called()
+
+    async def test_sync_roles_command_reports_summary(self):
+        """Test that the /sync_roles command defers, syncs, and reports a summary."""
+        self.danisen.sync_guild_roles = AsyncMock(return_value={"added": 3, "removed": 1, "skipped_members": 0})
+        self.ctx.guild = MagicMock()
+
+        await self.danisen.sync_roles(self.ctx)
+
+        self.ctx.defer.assert_called_once()
+        self.danisen.sync_guild_roles.assert_called_once_with(self.ctx.guild)
+        self.ctx.respond.assert_called_with(
+            "Role sync complete. Added 3 role(s), removed 1 role(s)."
+        )

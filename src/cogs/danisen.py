@@ -1,4 +1,4 @@
-import discord, sqlite3, asyncio, json, logging
+import discord, sqlite3, json, logging
 from discord.ext import commands, pages
 from cogs.database import *
 from cogs.custom_views import *
@@ -8,7 +8,7 @@ from constants import *
 
 class Danisen(commands.Cog):
     # Predefined characters and players
-    characters = ["Hyde", "Linne", "Waldstein", "Carmine", "Orie", "Gordeau", "Merkava", "Vatista", "Seth", "Yuzuriha", "Hilda", "Chaos", "Nanase", "Byakuya", "Phonon", "Mika", "Wagner", "Enkidu", "Londrekia", "Tsurugi", "Kaguya", "Kuon", "Uzuki", "Eltnum", "Akatsuki", "Ogre", "Izumi"]
+    characters = ["Hyde", "Linne", "Waldstein", "Carmine", "Orie", "Gordeau", "Merkava", "Vatista", "Seth", "Yuzuriha", "Hilda", "Chaos", "Nanase", "Byakuya", "Phonon", "Mika", "Wagner", "Enkidu", "Londrekia", "Tsurugi", "Kaguya", "Kuon", "Uzuki", "Eltnum", "Akatsuki", "Ogre", "Izumi", "Zohar"]
     players = ["player1", "player2"]
     dan_colours = [
         discord.Colour.from_rgb(255, 255, 255), discord.Colour.from_rgb(255, 255, 0), discord.Colour.from_rgb(255, 153, 0),
@@ -33,7 +33,9 @@ class Danisen(commands.Cog):
         self.database_cur.execute("CREATE TABLE IF NOT EXISTS players(discord_id, player_name, character, dan, points, PRIMARY KEY (discord_id, character))")
 
         # Queue and matchmaking setup
-        self.dans_in_queue = {dan: deque() for dan in range(1, self.total_dans + 1)}
+        # Keyed over the fixed MAX_DAN_RANK range (not the configurable total_dans) so that
+        # changing total_dans at runtime via /set_config can never leave a dan without a queue.
+        self.dans_in_queue = {dan: deque() for dan in range(1, MAX_DAN_RANK + 1)}
         self.matchmaking_queue = deque()
         self.max_active_matches = 3
         self.cur_active_matches = 0
@@ -58,7 +60,8 @@ class Danisen(commands.Cog):
         # Set all configuration values
         self.ACTIVE_MATCHES_CHANNEL_ID = int(config.get('ACTIVE_MATCHES_CHANNEL_ID', 0))
         self.REPORTED_MATCHES_CHANNEL_ID = int(config.get('REPORTED_MATCHES_CHANNEL_ID', 0))
-        self.total_dans = config.get('total_dans', MAX_DAN_RANK)
+        # Clamped to MAX_DAN_RANK since dans_in_queue and dan_colours are both sized to it
+        self.total_dans = max(1, min(config.get('total_dans', MAX_DAN_RANK), MAX_DAN_RANK))
         self.minimum_derank = config.get('minimum_derank', DEFAULT_DAN)
         self.maximum_rank_difference = config.get('maximum_rank_difference', 2)
         self.rank_gap_for_more_points = config.get('rank_gap_for_more_points', 1)
@@ -75,7 +78,7 @@ class Danisen(commands.Cog):
         self.queue_status = queue_status
         if not queue_status:
             self.matchmaking_queue.clear()  # Clear the deque
-            self.dans_in_queue = {dan: deque() for dan in range(1, self.total_dans + 1)}  # Reset to empty deques
+            self.dans_in_queue = {dan: deque() for dan in range(1, MAX_DAN_RANK + 1)}  # Reset to empty deques
             self.in_queue = {}
             self.in_match = {}
             await ctx.respond("The matchmaking queue has been disabled")
@@ -86,12 +89,74 @@ class Danisen(commands.Cog):
         # Check if a player's dan role should be removed
         role = None
         self.logger.info(f'Checking if dan should be removed as well')
-        res = self.database_cur.execute(f"SELECT * FROM players WHERE discord_id={player['discord_id']} AND dan={player['dan']}")
+        res = self.database_cur.execute(
+            "SELECT * FROM players WHERE discord_id=? AND dan=?",
+            (player['discord_id'], player['dan'])
+        )
         remaining_daniel = res.fetchone()
         if not remaining_daniel:
             self.logger.info(f"Dan role {player['dan']} will be removed")
             role = discord.utils.get(ctx.guild.roles, name=f"Dan {player['dan']}")
         return role
+
+    async def sync_guild_roles(self, guild):
+        """Reconciles every member's dan/character roles against the database (the source of truth).
+
+        Handles drift from things like a season reset (dan/points changed in the DB without
+        touching roles) or a role removal that silently failed earlier due to the bot's role
+        being too low at the time. Only adds/removes roles this bot is able to manage; anything
+        it can't touch is counted in 'skipped_members' rather than attempted.
+        """
+        rows = self.database_cur.execute("SELECT discord_id, character, dan FROM players").fetchall()
+        expected_by_member = {}
+        for row in rows:
+            entry = expected_by_member.setdefault(row['discord_id'], {'dans': set(), 'chars': set()})
+            entry['dans'].add(row['dan'])
+            entry['chars'].add(row['character'])
+
+        managed_role_names = {f"Dan {dan}" for dan in range(1, MAX_DAN_RANK + 1)} | set(self.characters)
+        bot_member = guild.get_member(self.bot.user.id)
+
+        self.logger.info(f"Starting role sync for guild '{guild.name}' ({guild.id}), {len(guild.members)} member(s)")
+
+        added = 0
+        removed = 0
+        skipped_members = 0
+
+        for member in guild.members:
+            entry = expected_by_member.get(member.id, {'dans': set(), 'chars': set()})
+            expected_names = {f"Dan {dan}" for dan in entry['dans']} | entry['chars']
+
+            current_managed_roles = [role for role in member.roles if role.name in managed_role_names]
+            current_names = {role.name for role in current_managed_roles}
+
+            roles_to_add = [
+                role for name in (expected_names - current_names)
+                if (role := discord.utils.get(guild.roles, name=name))
+            ]
+            roles_to_remove = [role for role in current_managed_roles if role.name not in expected_names]
+
+            manageable_add = [role for role in roles_to_add if self.can_manage_role(bot_member, role)]
+            manageable_remove = [role for role in roles_to_remove if self.can_manage_role(bot_member, role)]
+
+            if len(manageable_add) < len(roles_to_add) or len(manageable_remove) < len(roles_to_remove):
+                skipped_members += 1
+                self.logger.warning(f"Could not fully sync roles for {member.name} ({member.id}) due to bot's role being too low")
+
+            if manageable_add:
+                self.logger.info(f"Adding roles {[r.name for r in manageable_add]} to {member.name} ({member.id})")
+                await member.add_roles(*manageable_add)
+                added += len(manageable_add)
+            if manageable_remove:
+                self.logger.info(f"Removing roles {[r.name for r in manageable_remove]} from {member.name} ({member.id})")
+                await member.remove_roles(*manageable_remove)
+                removed += len(manageable_remove)
+
+        self.logger.info(
+            f"Role sync finished for guild '{guild.name}' ({guild.id}): "
+            f"added {added}, removed {removed}, skipped {skipped_members} member(s)"
+        )
+        return {"added": added, "removed": removed, "skipped_members": skipped_members}
 
     async def score_update(self, ctx, winner, loser):
         # Update scores for a match
@@ -147,8 +212,14 @@ class Danisen(commands.Cog):
         self.logger.info(f"Loser : {loser['player_name']} dan {loser_rank[0]}, points {loser_rank[1]}")
 
         # Update database
-        self.database_cur.execute(f"UPDATE players SET dan = {winner_rank[0]}, points = {winner_rank[1]} WHERE player_name='{winner['player_name']}' AND character='{winner['character']}'")
-        self.database_cur.execute(f"UPDATE players SET dan = {loser_rank[0]}, points = {loser_rank[1]} WHERE player_name='{loser['player_name']}' AND character='{loser['character']}'")
+        self.database_cur.execute(
+            "UPDATE players SET dan = ?, points = ? WHERE player_name=? AND character=?",
+            (winner_rank[0], winner_rank[1], winner['player_name'], winner['character'])
+        )
+        self.database_cur.execute(
+            "UPDATE players SET dan = ?, points = ? WHERE player_name=? AND character=?",
+            (loser_rank[0], loser_rank[1], loser['player_name'], loser['character'])
+        )
         self.database_con.commit()
 
         # Update roles on rankup/down
@@ -178,7 +249,7 @@ class Danisen(commands.Cog):
         return [character for character in self.characters if character.lower().startswith(ctx.value.lower())]
 
     async def player_autocomplete(self, ctx: discord.AutocompleteContext):
-        res = self.database_cur.execute(f"SELECT player_name FROM players")
+        res = self.database_cur.execute("SELECT player_name FROM players")
         name_list=res.fetchall()
         names = set([name[0] for name in name_list])
         return [name for name in names if (name.lower()).startswith(ctx.value.lower())]
@@ -193,9 +264,24 @@ class Danisen(commands.Cog):
         if not self.is_valid_char(char):
             await ctx.respond(f"Invalid char selected {char}. Please choose a valid char.")
             return
-        self.database_cur.execute(f"UPDATE players SET dan = {dan}, points = {points} WHERE player_name='{player_name}' AND character='{char}'")
+        self.database_cur.execute(
+            "UPDATE players SET dan = ?, points = ? WHERE player_name=? AND character=?",
+            (dan, points, player_name, char)
+        )
         self.database_con.commit()
         await ctx.respond(f"{player_name}'s {char} rank updated to be dan {dan} points {points}")
+
+    @discord.commands.slash_command(description="Reconcile every member's dan/character roles with the database (admin cmd)")
+    @discord.commands.default_permissions(manage_roles=True)
+    async def sync_roles(self, ctx: discord.ApplicationContext):
+        await ctx.defer()
+        self.logger.info(f"/sync_roles invoked by {ctx.author.name} ({ctx.author.id}) in guild '{ctx.guild.name}' ({ctx.guild.id})")
+        result = await self.sync_guild_roles(ctx.guild)
+
+        message = f"Role sync complete. Added {result['added']} role(s), removed {result['removed']} role(s)."
+        if result['skipped_members']:
+            message += f" Could not fully sync {result['skipped_members']} member(s) due to the bot's role being too low."
+        await ctx.respond(message)
 
     @discord.commands.slash_command(description="help msg")
     async def help(self, ctx : discord.ApplicationContext):
@@ -283,7 +369,10 @@ class Danisen(commands.Cog):
             await ctx.respond("You cannot unregister while in the queue. Please leave the queue first.")
             return
 
-        res = self.database_cur.execute(f"SELECT * FROM players WHERE discord_id={ctx.author.id} AND character='{char1}'")
+        res = self.database_cur.execute(
+            "SELECT * FROM players WHERE discord_id=? AND character=?",
+            (ctx.author.id, char1)
+        )
         daniel = res.fetchone()
 
         if daniel == None:
@@ -291,7 +380,10 @@ class Danisen(commands.Cog):
             return
 
         self.logger.info(f"Removing {ctx.author.name} {ctx.author.id} {char1} from db")
-        self.database_cur.execute(f"DELETE FROM players WHERE discord_id={ctx.author.id} AND character='{char1}'")
+        self.database_cur.execute(
+            "DELETE FROM players WHERE discord_id=? AND character=?",
+            (ctx.author.id, char1)
+        )
         self.database_con.commit()
 
         role_list = []
@@ -342,7 +434,10 @@ class Danisen(commands.Cog):
             member = ctx.author
         id = member.id
 
-        res = self.database_cur.execute(f"SELECT * FROM players WHERE discord_id={id} AND character='{char}'")
+        res = self.database_cur.execute(
+            "SELECT * FROM players WHERE discord_id=? AND character=?",
+            (id, char)
+        )
         data = res.fetchone()
         if data:
             await ctx.respond(f"""{data['player_name']}'s rank for {char} is {data['dan']} dan {data['points']} points""")
@@ -389,7 +484,10 @@ class Danisen(commands.Cog):
             return
 
         #Check if valid character
-        res = self.database_cur.execute(f"SELECT * FROM players WHERE discord_id={discord_id} AND character='{char}'")
+        res = self.database_cur.execute(
+            "SELECT * FROM players WHERE discord_id=? AND character=?",
+            (discord_id, char)
+        )
         daniel = res.fetchone()
         if daniel == None:
             await ctx.respond(f"You are not registered with that character")
@@ -424,7 +522,10 @@ class Danisen(commands.Cog):
         if self.queue_status == False:
             return
 
-        res = self.database_cur.execute(f"SELECT * FROM players WHERE discord_id={player['discord_id']} AND character='{player['character']}'")
+        res = self.database_cur.execute(
+            "SELECT * FROM players WHERE discord_id=? AND character=?",
+            (player['discord_id'], player['character'])
+        )
         db_player = res.fetchone()
         if not db_player:
             return  # Exit if the player is not found in the database

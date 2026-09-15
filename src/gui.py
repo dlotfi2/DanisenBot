@@ -2,6 +2,7 @@ from bot import *
 from PyQt6.QtGui import *
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
+import asyncio
 import sys
 import json
 import os
@@ -10,8 +11,9 @@ from io import StringIO
 import logging
 import shutil
 from constants import (
-    DB_PATH, CONFIG_PATH, LOG_FILE, DEFAULT_CONFIG, 
-    LOG_COLORS, GUI_WINDOW_TITLE, GUI_MIN_WIDTH, GUI_MIN_HEIGHT
+    DB_PATH, CONFIG_PATH, LOG_FILE, DEFAULT_CONFIG,
+    LOG_COLORS, GUI_WINDOW_TITLE, GUI_MIN_WIDTH, GUI_MIN_HEIGHT,
+    DEFAULT_DAN, DEFAULT_POINTS
 )
 
 from utils.config import save_config, load_config
@@ -305,19 +307,20 @@ class LogTab(QWidget):
                 self.logger.error(f"Error saving file: {str(e)}")
 
 class AdminTab(QWidget):
-    def __init__(self,con):
+    def __init__(self, bot):
         super().__init__()
-        self.con = con
+        self.bot = bot
 
         # Create and configure logger
         self.logger = logging.getLogger(__name__)
 
         layout = QVBoxLayout(self)
         # Create a button to trigger the save file dialog
-        self.reset_season_button = QPushButton('Reset Danisen for new season\n(will backup danisen db file)', self)
+        self.reset_season_button = QPushButton('Reset Danisen for new season\n(will backup danisen db file and resync roles)', self)
         self.reset_season_button.clicked.connect(self.reset_season)
 
         layout.addWidget(self.reset_season_button)
+
     def reset_season(self):
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -325,22 +328,36 @@ class AdminTab(QWidget):
             "",
             "Database Files (*.db);;All Files (*)"
         )
-        if file_path:
-            try:
-                shutil.copy(DB_PATH, file_path)
-                self.logger.info(f"danisen.db file copied to {file_path}")
-                self._reset_player_data()
-            except Exception as e:
-                self.logger.error(f"Failed to reset season: {str(e)}")
+        if not file_path:
+            self.logger.info("Season reset cancelled by user (no backup file chosen).")
+            return
+        asyncio.create_task(self._reset_season_async(file_path))
 
-    def _reset_player_data(self):
-        cursor = self.con.cursor()
-        cursor.execute("""
-            UPDATE players
-            SET dan = ?, points = ?
-        """, (1, 0))
-        self.con.commit()
-        self.logger.info("Player data reset successfully.")
+    async def _reset_season_async(self, file_path):
+        danisen = self.bot.get_cog("Danisen")
+        self.logger.info("Season reset requested from Admin tab.")
+        try:
+            shutil.copy(DB_PATH, file_path)
+            self.logger.info(f"danisen.db file backed up to {file_path}")
+
+            danisen.database_cur.execute(
+                "UPDATE players SET dan = ?, points = ?",
+                (DEFAULT_DAN, DEFAULT_POINTS)
+            )
+            danisen.database_con.commit()
+            self.logger.info(f"Player data reset to dan {DEFAULT_DAN}, points {DEFAULT_POINTS} for all players.")
+
+            if self.bot.is_ready():
+                self.logger.info(f"Resyncing roles across {len(self.bot.guilds)} guild(s) after season reset.")
+                for guild in self.bot.guilds:
+                    await danisen.sync_guild_roles(guild)
+            else:
+                self.logger.warning(
+                    "Bot is not connected, so roles could not be resynced. "
+                    "Run /sync_roles once the bot is back online."
+                )
+        except Exception as e:
+            self.logger.error(f"Failed to reset season: {str(e)}")
 
 class DanisenWindow(QMainWindow):
     def __init__(self):
@@ -380,7 +397,7 @@ class DanisenWindow(QMainWindow):
         tabs.addTab(MainTab(self.bot), "Main")
         tabs.addTab(ConfigTab(self.bot), "Config")
         tabs.addTab(logtab, "Logs")
-        tabs.addTab(AdminTab(self.con), "Admin")
+        tabs.addTab(AdminTab(self.bot), "Admin")
         #TODO tabs.addTab(self.create_logs_tab(), "Logs")
 
         layout.addWidget(tabs)

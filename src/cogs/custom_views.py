@@ -1,5 +1,4 @@
 import discord
-import json
 import logging
 class MatchSelect(discord.ui.Select):
     def __init__(self, bot, p1, p2):
@@ -73,29 +72,8 @@ class MatchSelect(discord.ui.Select):
         await interaction.message.delete()
 
 class MatchView(discord.ui.View):
-    json_path = r"C:\\Users\Deled\Desktop\Danisen\\_overlays\streamcontrol.json"
     def __init__(self, bot, p1, p2):
         super().__init__(timeout=None)
         self.p1 = p1
         self.p2 = p2
         self.add_item(MatchSelect(bot, p1, p2))
-    
-    @discord.ui.button(label="Update Stream", style=discord.ButtonStyle.primary)
-    async def button_callback(self, button, interaction):
-        await interaction.response.defer()
-        if not interaction.user.guild_permissions.administrator:
-            return
-
-        with open(self.json_path, "r+") as f:
-            overlay = json.load(f)
-            overlay["mText1"] = self.p1["character"]
-            overlay["mText2"] = self.p2["character"]
-            overlay["p1Name"] = self.p1["player_name"]
-            overlay["p1Score"] = 0
-            overlay["p2Name"] = self.p2["player_name"]
-            overlay["p2Score"] = 0
-            f.seek(0)
-            f.truncate(0)
-            json.dump(overlay,f)
-
-        await interaction.respond("Stream Updated") 
