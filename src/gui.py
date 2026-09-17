@@ -13,7 +13,8 @@ import shutil
 from constants import (
     DB_PATH, CONFIG_PATH, LOG_FILE, DEFAULT_CONFIG,
     LOG_COLORS, GUI_WINDOW_TITLE, GUI_MIN_WIDTH, GUI_MIN_HEIGHT,
-    DEFAULT_DAN, DEFAULT_POINTS
+    DEFAULT_DAN, DEFAULT_POINTS,
+    RANKUP_POINTS_NORMAL, RANKUP_POINTS_SPECIAL, RANKDOWN_POINTS
 )
 
 from utils.config import save_config, load_config
@@ -153,6 +154,21 @@ class ConfigTab(QWidget):
         self.special_rank_up_rules = QCheckBox()
         self.special_rank_up_rules.setToolTip("Enable special rank-up rules for players 7dan and above")
 
+        self.rankup_points_normal = QSpinBox()
+        self.rankup_points_normal.setRange(1, 20)
+        self.rankup_points_normal.setValue(RANKUP_POINTS_NORMAL)
+        self.rankup_points_normal.setToolTip("Points needed to rank up below the special rank threshold")
+
+        self.rankup_points_special = QSpinBox()
+        self.rankup_points_special.setRange(1, 20)
+        self.rankup_points_special.setValue(RANKUP_POINTS_SPECIAL)
+        self.rankup_points_special.setToolTip("Points needed to rank up at/above the special rank threshold")
+
+        self.rankdown_points = QSpinBox()
+        self.rankdown_points.setRange(-20, -1)
+        self.rankdown_points.setValue(RANKDOWN_POINTS)
+        self.rankdown_points.setToolTip("Points at/below which a player ranks down (must stay below 0 and below the rank-up thresholds)")
+
         #Adding fields to form
         self.config_form_layout.addRow("Bot Token:", self.bot_token)
         self.config_form_layout.addRow("Active Match Channel Id:", self.ACTIVE_MATCHES_CHANNEL_ID)
@@ -163,6 +179,9 @@ class ConfigTab(QWidget):
         self.config_form_layout.addRow("Rank Gap for More Points:", self.rank_gap_for_more_points)
         self.config_form_layout.addRow("Recent Opponents Limit:", self.recent_opponents_limit)
         self.config_form_layout.addRow("Max Active Matches:", self.max_active_matches)
+        self.config_form_layout.addRow("Rankup Points (Normal):", self.rankup_points_normal)
+        self.config_form_layout.addRow("Rankup Points (Special):", self.rankup_points_special)
+        self.config_form_layout.addRow("Rankdown Points:", self.rankdown_points)
 
         #add checkboxes
         self.config_form_layout.addRow("Point Rollover:",  self.point_rollover)
@@ -198,8 +217,11 @@ class ConfigTab(QWidget):
             "minimum_derank" : self.minimum_derank.value(),
             "maximum_rank_difference" : self.maximum_rank_difference.value(),
             "rank_gap_for_more_points" : self.rank_gap_for_more_points.value(),
-            "recent_opponents_limit": self.recent_opponents_limit.value(),  # New 
+            "recent_opponents_limit": self.recent_opponents_limit.value(),  # New
             "max_active_matches": self.max_active_matches.value(),  # New parameter
+            "rankup_points_normal": self.rankup_points_normal.value(),
+            "rankup_points_special": self.rankup_points_special.value(),
+            "rankdown_points": self.rankdown_points.value(),
             #Bools
             "point_rollover" : self.point_rollover.isChecked(),
             "queue_status" :  self.queue_status.isChecked(),
@@ -218,7 +240,10 @@ class ConfigTab(QWidget):
         self.maximum_rank_difference.setValue(config.get("maximum_rank_difference", 1))
         self.rank_gap_for_more_points.setValue(config.get("rank_gap_for_more_points", 1))
         self.max_active_matches.setValue(config.get("max_active_matches", 3))
-        self.recent_opponents_limit.setValue(config.get("recent_opponents_limit", 5)) 
+        self.recent_opponents_limit.setValue(config.get("recent_opponents_limit", 5))
+        self.rankup_points_normal.setValue(config.get("rankup_points_normal", RANKUP_POINTS_NORMAL))
+        self.rankup_points_special.setValue(config.get("rankup_points_special", RANKUP_POINTS_SPECIAL))
+        self.rankdown_points.setValue(config.get("rankdown_points", RANKDOWN_POINTS))
         #Bools
         self.point_rollover.setChecked(config.get("point_rollover", True))
         self.queue_status.setChecked(config.get("queue_status", True))
