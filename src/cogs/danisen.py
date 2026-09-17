@@ -70,6 +70,9 @@ class Danisen(commands.Cog):
         self.recent_opponents_limit = config.get('recent_opponents_limit', 2)
         self.max_active_matches = config.get('max_active_matches', 3)  # New parameter
         self.special_rank_up_rules = config.get('special_rank_up_rules', False)
+        self.rankup_points_normal = config.get('rankup_points_normal', RANKUP_POINTS_NORMAL)
+        self.rankup_points_special = config.get('rankup_points_special', RANKUP_POINTS_SPECIAL)
+        self.rankdown_points = config.get('rankdown_points', RANKDOWN_POINTS)
 
     @discord.commands.slash_command(description="Close or open the MM queue (admin debug cmd)")
     @discord.commands.default_permissions(manage_roles=True)
@@ -166,7 +169,7 @@ class Danisen(commands.Cog):
         rankup = False
 
         # Determine rankup points based on rank type
-        rankup_points = RANKUP_POINTS_SPECIAL if winner_rank[0] >= SPECIAL_RANK_THRESHOLD else RANKUP_POINTS_NORMAL
+        rankup_points = self.rankup_points_special if winner_rank[0] >= SPECIAL_RANK_THRESHOLD else self.rankup_points_normal
 
         # Winning logic
         if winner_rank[0] > loser_rank[0] + self.maximum_rank_difference:
@@ -201,7 +204,7 @@ class Danisen(commands.Cog):
                 rankup = True
 
         # Rankdown logic
-        if loser_rank[1] <= RANKDOWN_POINTS:
+        if loser_rank[1] <= self.rankdown_points:
             loser_rank[0] -= 1
             loser_rank[1] = DEFAULT_POINTS
             rankdown = True
@@ -797,6 +800,10 @@ class Danisen(commands.Cog):
         merged['queue_status'] = self.queue_status
         merged['total_dans'] = self.total_dans
 
+        # Never expose the bot token
+        if 'bot_token' in merged:
+            merged['bot_token'] = '***REDACTED***' if merged['bot_token'] else '(not set)'
+
         em = discord.Embed(title="Current Configuration", color=discord.Color.blurple())
         for k, v in merged.items():
             em.add_field(name=str(k), value=str(v), inline=False)
@@ -810,7 +817,8 @@ class Danisen(commands.Cog):
                              "ACTIVE_MATCHES_CHANNEL_ID", "REPORTED_MATCHES_CHANNEL_ID",
                              "total_dans", "minimum_derank", "maximum_rank_difference",
                              "rank_gap_for_more_points", "point_rollover", "queue_status",
-                             "recent_opponents_limit", "max_active_matches", "special_rank_up_rules"
+                             "recent_opponents_limit", "max_active_matches", "special_rank_up_rules",
+                             "rankup_points_normal", "rankup_points_special", "rankdown_points"
                          ]),
                          value: discord.Option(str)):
         """Update a single configuration key and persist it to disk."""
@@ -887,6 +895,29 @@ class Danisen(commands.Cog):
 
         # Store the parsed value
         cfg[key] = parsed_value
+
+        # Keep the rankdown threshold sane relative to rankup thresholds and the
+        # default starting points (players register at DEFAULT_POINTS, currently 0)
+        if key in ("rankdown_points", "rankup_points_normal", "rankup_points_special"):
+            rankdown = cfg.get("rankdown_points", DEFAULT_CONFIG["rankdown_points"])
+            rankup_normal = cfg.get("rankup_points_normal", DEFAULT_CONFIG["rankup_points_normal"])
+            rankup_special = cfg.get("rankup_points_special", DEFAULT_CONFIG["rankup_points_special"])
+
+            if rankdown >= DEFAULT_POINTS:
+                await ctx.respond(
+                    f"Invalid value: `rankdown_points` ({rankdown}) must be less than the default "
+                    f"starting points ({DEFAULT_POINTS}), otherwise newly registered players would "
+                    "already be at or below the rankdown threshold.",
+                    ephemeral=True
+                )
+                return
+            if rankdown >= rankup_normal or rankdown >= rankup_special:
+                await ctx.respond(
+                    f"Invalid value: `rankdown_points` ({rankdown}) must be less than both "
+                    f"`rankup_points_normal` ({rankup_normal}) and `rankup_points_special` ({rankup_special}).",
+                    ephemeral=True
+                )
+                return
 
         # Ensure the config dir exists and write back
         try:

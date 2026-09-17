@@ -249,6 +249,36 @@ class TestDanisen(unittest.IsolatedAsyncioTestCase):
             (1, 0, "Loser", "Linne")
         )
 
+    async def test_score_update_configurable_rankup_points(self):
+        """Test that a lower configured rankup_points_normal triggers rankup sooner."""
+        self.ctx.guild = MagicMock()
+        self.ctx.guild.get_member = MagicMock(return_value=self.ctx.author)
+        self.ctx.guild.roles = [MagicMock(name="Dan 1"), MagicMock(name="Dan 2")]
+        self.danisen.rankup_points_normal = 2
+
+        winner = {"player_name": "Winner", "discord_id": 12345, "dan": 1, "points": 1, "character": "Hyde"}
+        loser = {"player_name": "Loser", "discord_id": 67890, "dan": 1, "points": 3, "character": "Linne"}
+
+        winner_rank, loser_rank = await self.danisen.score_update(self.ctx, winner, loser)
+
+        # 1 point + 1 for the win = 2, which now meets the lowered rankup threshold
+        self.assertEqual(winner_rank, [2, 0])
+
+    async def test_score_update_configurable_rankdown_points(self):
+        """Test that a less negative configured rankdown_points triggers rankdown sooner."""
+        self.ctx.guild = MagicMock()
+        self.ctx.guild.get_member = MagicMock(return_value=self.ctx.author)
+        self.ctx.guild.roles = [MagicMock(name="Dan 1"), MagicMock(name="Dan 2")]
+        self.danisen.rankdown_points = -1
+
+        winner = {"player_name": "Winner", "discord_id": 12345, "dan": 1, "points": 0, "character": "Hyde"}
+        loser = {"player_name": "Loser", "discord_id": 67890, "dan": 2, "points": 0, "character": "Linne"}
+
+        winner_rank, loser_rank = await self.danisen.score_update(self.ctx, winner, loser)
+
+        # 0 points - 1 for the loss = -1, which now meets the raised rankdown threshold
+        self.assertEqual(loser_rank, [1, 0])
+
     async def test_set_queue(self):
         """Test enabling and disabling the matchmaking queue."""
         queue_status = False
@@ -394,7 +424,10 @@ class TestDanisen(unittest.IsolatedAsyncioTestCase):
             "rank_gap_for_more_points": 1,
             "point_rollover": False,
             "queue_status": False,
-            "recent_opponents_limit": 5
+            "recent_opponents_limit": 5,
+            "rankup_points_normal": 4,
+            "rankup_points_special": 6,
+            "rankdown_points": -2
         }
 
         with patch("builtins.open", unittest.mock.mock_open(read_data=json.dumps(mock_config))):
@@ -410,6 +443,9 @@ class TestDanisen(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.danisen.point_rollover)
         self.assertFalse(self.danisen.queue_status)
         self.assertEqual(self.danisen.recent_opponents_limit, 5)
+        self.assertEqual(self.danisen.rankup_points_normal, 4)
+        self.assertEqual(self.danisen.rankup_points_special, 6)
+        self.assertEqual(self.danisen.rankdown_points, -2)
 
     async def test_set_rank(self):
         """Test setting the rank and points for a player."""
@@ -456,6 +492,70 @@ class TestDanisen(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.danisen.total_dans, 12)
         self.assertTrue(self.danisen.queue_status)
+
+    async def test_view_config_redacts_bot_token(self):
+        """Test that /view_config never exposes the raw bot token."""
+        mock_config = {"bot_token": "super-secret-token"}
+
+        with patch("builtins.open", unittest.mock.mock_open(read_data=json.dumps(mock_config))):
+            with patch("os.path.exists", return_value=True):
+                await self.danisen.view_config(self.ctx)
+
+        self.ctx.respond.assert_called_once()
+        _, kwargs = self.ctx.respond.call_args
+        embed = kwargs["embed"]
+        token_field = next(f for f in embed.fields if f.name == "bot_token")
+        self.assertNotIn("super-secret-token", token_field.value)
+
+    async def test_set_config_rankdown_points_valid(self):
+        """Test that rankdown_points can be updated when it stays below the rankup thresholds and DEFAULT_POINTS."""
+        with patch("os.path.exists", return_value=False):
+            with patch("os.makedirs"):
+                with patch("builtins.open", unittest.mock.mock_open()):
+                    with patch("cogs.danisen.json.dump") as mock_dump:
+                        with patch.object(self.danisen, "update_config"):
+                            await self.danisen.set_config(self.ctx, "rankdown_points", "-2")
+
+        written_cfg = mock_dump.call_args[0][0]
+        self.assertEqual(written_cfg["rankdown_points"], -2)
+        self.ctx.respond.assert_called_with(
+            "Configuration key `rankdown_points` updated to `-2`", ephemeral=True
+        )
+
+    async def test_set_config_rankdown_points_rejects_non_negative(self):
+        """Test that rankdown_points must stay below the default starting points (0)."""
+        with patch("os.path.exists", return_value=False):
+            with patch("builtins.open", unittest.mock.mock_open()):
+                with patch("cogs.danisen.json.dump") as mock_dump:
+                    await self.danisen.set_config(self.ctx, "rankdown_points", "0")
+
+        mock_dump.assert_not_called()
+        message = self.ctx.respond.call_args[0][0]
+        self.assertIn("Invalid value", message)
+
+    async def test_set_config_rankdown_points_rejects_when_not_below_rankup(self):
+        """Test that rankdown_points must stay below both rankup thresholds."""
+        existing_cfg = {"rankup_points_normal": -5, "rankup_points_special": -5}
+        with patch("os.path.exists", return_value=True):
+            with patch("builtins.open", unittest.mock.mock_open(read_data=json.dumps(existing_cfg))):
+                with patch("cogs.danisen.json.dump") as mock_dump:
+                    await self.danisen.set_config(self.ctx, "rankdown_points", "-3")
+
+        mock_dump.assert_not_called()
+        message = self.ctx.respond.call_args[0][0]
+        self.assertIn("Invalid value", message)
+
+    async def test_set_config_rankup_points_normal_rejects_when_at_or_below_rankdown(self):
+        """Test that lowering rankup_points_normal to or below rankdown_points is rejected."""
+        existing_cfg = {"rankdown_points": -3}
+        with patch("os.path.exists", return_value=True):
+            with patch("builtins.open", unittest.mock.mock_open(read_data=json.dumps(existing_cfg))):
+                with patch("cogs.danisen.json.dump") as mock_dump:
+                    await self.danisen.set_config(self.ctx, "rankup_points_normal", "-3")
+
+        mock_dump.assert_not_called()
+        message = self.ctx.respond.call_args[0][0]
+        self.assertIn("Invalid value", message)
 
     async def test_dead_role_role_removal(self):
         """Test if the correct role is returned for removal."""

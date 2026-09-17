@@ -26,7 +26,10 @@ DEFAULT_CONFIG = {
     "point_rollover": True,
     "queue_status": True,
     "special_rank_up_rules": False,
-    "max_active_matches": 3
+    "max_active_matches": 3,
+    "rankup_points_normal": 3,
+    "rankup_points_special": 5,
+    "rankdown_points": -3
 }
 
 # Logging colors
