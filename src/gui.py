@@ -249,10 +249,35 @@ class ConfigTab(QWidget):
         self.queue_status.setChecked(config.get("queue_status", True))
         self.special_rank_up_rules.setChecked(config.get("special_rank_up_rules", False))
 
+    def validate_config_dict(self, config):
+        """Return an error message if the config is invalid, otherwise None"""
+        rankdown = config["rankdown_points"]
+        rankup_normal = config["rankup_points_normal"]
+        rankup_special = config["rankup_points_special"]
+
+        if rankdown >= DEFAULT_POINTS:
+            return (
+                f"Rankdown Points ({rankdown}) must be less than the default starting points "
+                f"({DEFAULT_POINTS}), otherwise newly registered players would already be at or "
+                "below the rankdown threshold."
+            )
+        if rankdown >= rankup_normal or rankdown >= rankup_special:
+            return (
+                f"Rankdown Points ({rankdown}) must be less than both Rankup Points (Normal) "
+                f"({rankup_normal}) and Rankup Points (Special) ({rankup_special})."
+            )
+        return None
+
     def save_config(self):
         """Save configuration to file"""
         try:
             config = self.get_config_dict()
+
+            error = self.validate_config_dict(config)
+            if error:
+                QMessageBox.warning(self, "Invalid Configuration", error)
+                return
+
             save_config(self.settings_file, config)
 
             update_bot_config(self.bot)
